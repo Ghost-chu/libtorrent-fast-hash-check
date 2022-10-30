@@ -15,5 +15,5 @@ jobs:
         with:
           token: ${{ secrets.PERSONAL_TOKEN }}
           owner: arvidn
-          base: master
-          head: master
+          base: RC_1_2
+          head: RC_1_2
