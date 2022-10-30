@@ -106,7 +106,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #endif
 
 #include "libtorrent/aux_/torrent_impl.hpp"
-
+#define SKIP_PIECE_LEN 128
 using namespace std::placeholders;
 
 namespace libtorrent {
@@ -132,6 +132,7 @@ bool is_downloading_state(int const st)
 }
 } // anonymous namespace
 
+	bool fast_checking_global = true;
 	constexpr web_seed_flag_t torrent::ephemeral;
 
 	web_seed_t::web_seed_t(web_seed_entry const& wse)
@@ -589,8 +590,8 @@ bool is_downloading_state(int const st)
 		m_seed_mode = false;
 		// seed is false if we turned out not
 		// to be a seed after all
-		if (checking == seed_mode_t::check_files
-			&& state() != torrent_status::checking_resume_data)
+		if ( m_dirty_check_failed || (checking == seed_mode_t::check_files
+			&& state() != torrent_status::checking_resume_data))
 		{
 			m_have_all = false;
 			set_state(torrent_status::downloading);
@@ -705,7 +706,10 @@ bool is_downloading_state(int const st)
 		update_want_scrape();
 		update_want_tick();
 		update_state_list();
-
+		if(m_dirty_check_failed) {
+			force_recheck();
+		}
+		else
 #if TORRENT_ABI_VERSION == 1
 		// deprecated in 1.2
 		if (!m_torrent_file->is_valid() && !m_url.empty())
@@ -2455,10 +2459,12 @@ bool is_downloading_state(int const st)
 	}
 	catch (...) { handle_exception(); }
 
-	void torrent::start_checking()
+	void torrent::start_checking(bool is_fast_checking)
 	{
 		TORRENT_ASSERT(should_check_files());
-
+		if(m_dirty_check_failed) {
+			is_fast_checking = m_dirty_check_failed = false;
+		}
 		int num_outstanding = settings().get_int(settings_pack::checking_mem_usage) * block_size()
 			/ m_torrent_file->piece_length();
 		// if we only keep a single read operation in-flight at a time, we suffer
@@ -2484,14 +2490,54 @@ bool is_downloading_state(int const st)
 		num_outstanding -= (static_cast<int>(m_checking_piece)
 			- static_cast<int>(m_num_checked_pieces));
 		if (num_outstanding < 0) num_outstanding = 0;
-
+		// init noskip_pieces
+		if(is_fast_checking){
+			std::lock_guard<std::mutex> g(m_noskip_pieces_mtx);
+			file_storage const&fs = m_torrent_file->files();
+			if(m_noskip_pieces.empty()){
+				for(int i = 0; i < fs.num_files(); ++i) {
+					auto const range = file_piece_range_inclusive(fs, file_index_t(i));
+					m_noskip_pieces.emplace(std::get<0>(range));
+					m_noskip_pieces.emplace(std::get<1>(range));
+				}
+			}
+		}
 		for (int i = 0; i < num_outstanding; ++i)
 		{
 			m_ses.disk_thread().async_hash(m_storage, m_checking_piece
 				, disk_interface::sequential_access | disk_interface::volatile_read
 				, std::bind(&torrent::on_piece_hashed
-					, shared_from_this(), _1, _2, _3));
-			++m_checking_piece;
+					, shared_from_this(), _1, _2, _3, is_fast_checking));
+			// check or not?
+			bool skip_enable = is_fast_checking && fast_checking_global;
+			if(skip_enable) {
+				m_checking_piece_fast_mtx.lock();
+				piece_index_t begin = m_checking_piece, end;
+				int next_offset = SKIP_PIECE_LEN-int(m_checking_piece%SKIP_PIECE_LEN);
+				auto it = m_noskip_pieces.upper_bound(piece_index_t(int(m_checking_piece)+1));
+				if(it != m_noskip_pieces.end() && int(*it - m_checking_piece) < next_offset) {
+					next_offset = int(*it - m_checking_piece);
+				}
+				end = m_checking_piece+=next_offset;
+				m_checking_piece_fast_mtx.unlock();
+				++begin;
+				for(piece_index_t i = begin; i < end; ++i) {
+					if (i >= m_torrent_file->end_piece()) break;
+					if (m_num_checked_pieces >= m_torrent_file->end_piece()) break;
+					state_updated();
+					++m_num_checked_pieces;
+					m_progress_ppm = std::uint32_t(std::int64_t(static_cast<int>(m_num_checked_pieces))
+						* 1000000 / torrent_file().num_pieces());
+					if (has_picker() || !m_have_all) {
+						need_picker();
+						m_picker->we_have(i);
+						update_gauge();
+					}
+					we_have(i);
+				}
+			} else {
+				++m_checking_piece;
+			}
 			if (m_checking_piece >= m_torrent_file->end_piece()) break;
 		}
 #ifndef TORRENT_DISABLE_LOGGING
@@ -2503,7 +2549,7 @@ bool is_downloading_state(int const st)
 	// This is only used for checking of torrents. i.e. force-recheck or initial checking
 	// of existing files
 	void torrent::on_piece_hashed(piece_index_t const piece
-		, sha1_hash const& piece_hash, storage_error const& error) try
+		, sha1_hash const& piece_hash, storage_error const& error, bool is_fast_checking) try
 	{
 		TORRENT_ASSERT(is_single_thread());
 		INVARIANT_CHECK;
@@ -2514,9 +2560,21 @@ bool is_downloading_state(int const st)
 		state_updated();
 
 		++m_num_checked_pieces;
-
+		if(m_dirty_check_failed) {
+			m_checking_piece = piece_index_t{0};
+			m_num_checked_pieces = piece_index_t{0};
+			auto_managed(false);
+			pause();
+			// recalculate auto-managed torrents sooner
+			// in order to start checking the next torrent
+			m_ses.trigger_auto_manage();
+			return;
+		}
 		if (error)
 		{
+			if(is_fast_checking) {
+				m_dirty_check_failed = true;
+			}
 			if (error.ec == boost::system::errc::no_such_file_or_directory
 				|| error.ec == boost::asio::error::eof
 #ifdef TORRENT_WINDOWS
@@ -2524,6 +2582,7 @@ bool is_downloading_state(int const st)
 #endif
 				)
 			{
+				m_checking_piece_fast_mtx.lock();
 				TORRENT_ASSERT(error.file() >= file_index_t(0));
 
 				// skip this file by updating m_checking_piece to the first piece following it
@@ -2536,6 +2595,7 @@ bool is_downloading_state(int const st)
 					m_num_checked_pieces = piece_index_t(static_cast<int>(m_num_checked_pieces) + diff);
 					m_checking_piece = last;
 				}
+				m_checking_piece_fast_mtx.unlock();
 			}
 			else
 			{
@@ -2582,8 +2642,20 @@ bool is_downloading_state(int const st)
 			// if the hash failed, remove it from the cache
 			if (m_storage)
 				m_ses.disk_thread().clear_piece(m_storage, piece);
+			if(is_fast_checking) {
+				m_dirty_check_failed = true;
+			}
 		}
-
+		if(m_dirty_check_failed) {
+			m_checking_piece = piece_index_t{0};
+			m_num_checked_pieces = piece_index_t{0};
+			auto_managed(false);
+			pause();
+			// recalculate auto-managed torrents sooner
+			// in order to start checking the next torrent
+			m_ses.trigger_auto_manage();
+			return;
+		}
 		if (m_num_checked_pieces < m_torrent_file->end_piece())
 		{
 			// we're not done yet, issue another job
@@ -2610,19 +2682,46 @@ bool is_downloading_state(int const st)
 				}
 				return;
 			}
-
 			m_ses.disk_thread().async_hash(m_storage, m_checking_piece
 				, disk_interface::sequential_access | disk_interface::volatile_read
 				, std::bind(&torrent::on_piece_hashed
-					, shared_from_this(), _1, _2, _3));
-			++m_checking_piece;
+					, shared_from_this(), _1, _2, _3, is_fast_checking));
+			// check or not?
+			bool skip_enable = is_fast_checking && fast_checking_global;
+			if(skip_enable) {
+				m_checking_piece_fast_mtx.lock();
+				piece_index_t begin = m_checking_piece, end;
+				int next_offset = SKIP_PIECE_LEN-int(m_checking_piece%SKIP_PIECE_LEN);
+				auto it = m_noskip_pieces.upper_bound(piece_index_t(int(m_checking_piece)+1));
+				if(it != m_noskip_pieces.end() && int(*it - m_checking_piece) < next_offset) {
+					next_offset = int(*it - m_checking_piece);
+				}
+				end = m_checking_piece+=next_offset;
+				m_checking_piece_fast_mtx.unlock();
+				++begin;
+				for(piece_index_t i = begin; i < end; ++i) {
+					if (i >= m_torrent_file->end_piece()) break;
+					if (m_num_checked_pieces >= m_torrent_file->end_piece()) break;
+					state_updated();
+					++m_num_checked_pieces;
+					m_progress_ppm = std::uint32_t(std::int64_t(static_cast<int>(m_num_checked_pieces))
+						* 1000000 / torrent_file().num_pieces());
+					if (has_picker() || !m_have_all) {
+						need_picker();
+						m_picker->we_have(i);
+						update_gauge();
+					}
+					we_have(i);
+				}
+			} else {
+				++m_checking_piece;
+			}
 #ifndef TORRENT_DISABLE_LOGGING
 			debug_log("on_piece_hashed, m_checking_piece: %d"
 				, static_cast<int>(m_checking_piece));
 #endif
 			return;
 		}
-
 #ifndef TORRENT_DISABLE_LOGGING
 		debug_log("on_piece_hashed, completed");
 #endif
@@ -7699,9 +7798,8 @@ bool is_downloading_state(int const st)
 			&& m_state != torrent_status::checking_files);
 
 		// we're downloading now, which means we're no longer in seed mode
-		if (m_seed_mode)
+		if (m_seed_mode || m_dirty_check_failed)
 			leave_seed_mode(seed_mode_t::check_files);
-
 		TORRENT_ASSERT(!is_finished());
 		set_state(torrent_status::downloading);
 		set_queue_position(last_pos);
@@ -7843,7 +7941,9 @@ bool is_downloading_state(int const st)
 		// we might be finished already, in which case we should
 		// not switch to downloading mode. If all files are
 		// filtered, we're finished when we start.
-		if (m_state != torrent_status::finished
+		if(m_dirty_check_failed) {
+			force_recheck();
+		} else if (m_state != torrent_status::finished
 			&& m_state != torrent_status::seeding
 			&& !m_seed_mode)
 		{

@@ -40,6 +40,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <deque>
 #include <limits> // for numeric_limits
 #include <memory> // for unique_ptr
+#include <mutex>
 
 #include "libtorrent/fwd.hpp"
 #include "libtorrent/optional.hpp"
@@ -243,6 +244,9 @@ namespace libtorrent {
 		// the case there is no piece picker, see m_have_all.
 		std::unique_ptr<piece_picker> m_picker;
 
+
+		std::set<piece_index_t> m_noskip_pieces;
+		std::mutex m_noskip_pieces_mtx;
 		// TODO: make this a raw pointer. perhaps keep the shared_ptr
 		// around further down the object to maintain an owner
 		std::shared_ptr<torrent_info> m_torrent_file;
@@ -406,9 +410,9 @@ namespace libtorrent {
 		void on_resume_data_checked(status_t status, storage_error const& error);
 		void on_force_recheck(status_t status, storage_error const& error);
 		void on_piece_hashed(piece_index_t piece, sha1_hash const& piece_hash
-			, storage_error const& error);
+			, storage_error const& error, bool is_fast_checking = false);
 		void files_checked();
-		void start_checking();
+		void start_checking(bool is_fast_checking = true);
 
 		void start_announcing();
 		void stop_announcing();
@@ -1446,10 +1450,12 @@ namespace libtorrent {
 		// if we're finished, this is the timestamp of when we finished
 		time_point32 m_became_finished = aux::time_now32();
 
+		// failed on dirty checking
+		bool m_dirty_check_failed = false;
 		// when checking, this is the first piece we have not
 		// issued a hash job for
 		piece_index_t m_checking_piece{0};
-
+		std::mutex m_checking_piece_fast_mtx;
 		// the number of pieces we completed the check of
 		piece_index_t m_num_checked_pieces{0};
 
