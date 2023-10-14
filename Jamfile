@@ -371,6 +371,7 @@ rule openssl-lib-path ( properties * )
 		local address_model = [ feature.get-values <address-model> : $(properties) ] ;
 		OPENSSL_LIB += "C:/Program Files/OpenSSL-Win$(address_model)/lib" ;
 		OPENSSL_LIB += "C:/Program Files (x86)/OpenSSL-Win$(address_model)/lib" ;
+		OPENSSL_LIB += "C:/Program Files/OpenSSL/lib" ;
 	}
 
 	local result ;
@@ -398,6 +399,7 @@ rule openssl-include-path ( properties * )
 		local address_model = [ feature.get-values <address-model> : $(properties) ] ;
 		OPENSSL_INCLUDE += "C:/Program Files/OpenSSL-Win$(address_model)/include" ;
 		OPENSSL_INCLUDE += "C:/Program Files (x86)/OpenSSL-Win$(address_model)/include" ;
+		OPENSSL_INCLUDE += "C:/Program Files/OpenSSL/include" ;
 	}
 
 	local result ;
@@ -637,6 +639,7 @@ SOURCES =
 	ip_notifier
 	ip_voter
 	listen_socket_handle
+	load_torrent
 	merkle
 	peer_connection
 	platform_util
@@ -865,7 +868,7 @@ rule generate-pkg-config ( properties * )
 	local libname = [ $(props[2]).name ] ;
 	props = $(props[1]) ;
 
-	local FULL_VERSION = 1.2.18 ;
+	local FULL_VERSION = 1.2.19 ;
 
 	p = [ install-paths $(properties) ] ;
 

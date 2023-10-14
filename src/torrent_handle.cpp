@@ -99,16 +99,16 @@ namespace libtorrent {
 #ifndef BOOST_NO_EXCEPTIONS
 			try {
 #endif
-				(t.get()->*f)(a...);
+				(t.get()->*f)(std::move(a)...);
 #ifndef BOOST_NO_EXCEPTIONS
 			} catch (system_error const& e) {
-				ses.alerts().emplace_alert<torrent_error_alert>(torrent_handle(m_torrent)
+				ses.alerts().emplace_alert<torrent_error_alert>(torrent_handle(t)
 					, e.code(), e.what());
 			} catch (std::exception const& e) {
-				ses.alerts().emplace_alert<torrent_error_alert>(torrent_handle(m_torrent)
+				ses.alerts().emplace_alert<torrent_error_alert>(torrent_handle(t)
 					, error_code(), e.what());
 			} catch (...) {
-				ses.alerts().emplace_alert<torrent_error_alert>(torrent_handle(m_torrent)
+				ses.alerts().emplace_alert<torrent_error_alert>(torrent_handle(t)
 					, error_code(), "unknown error");
 			}
 #endif
@@ -131,7 +131,7 @@ namespace libtorrent {
 #ifndef BOOST_NO_EXCEPTIONS
 			try {
 #endif
-				(t.get()->*f)(a...);
+				(t.get()->*f)(std::move(a)...);
 #ifndef BOOST_NO_EXCEPTIONS
 			} catch (...) {
 				ex = std::current_exception();
@@ -167,7 +167,7 @@ namespace libtorrent {
 #ifndef BOOST_NO_EXCEPTIONS
 			try {
 #endif
-				r = (t.get()->*f)(a...);
+				r = (t.get()->*f)(std::move(a)...);
 #ifndef BOOST_NO_EXCEPTIONS
 			} catch (...) {
 				ex = std::current_exception();
@@ -487,7 +487,7 @@ namespace libtorrent {
 		aux::vector<download_priority_t, piece_index_t> ret;
 		auto retp = &ret;
 		sync_call(&torrent::piece_priorities, retp);
-		return std::move(ret);
+		return TORRENT_RVO(ret);
 	}
 
 #if TORRENT_ABI_VERSION == 1
@@ -543,7 +543,7 @@ namespace libtorrent {
 		aux::vector<download_priority_t, file_index_t> ret;
 		auto retp = &ret;
 		sync_call(&torrent::file_priorities, retp);
-		return std::move(ret);
+		return TORRENT_RVO(ret);
 	}
 
 #if TORRENT_ABI_VERSION == 1
@@ -674,6 +674,12 @@ namespace libtorrent {
 	void torrent_handle::add_piece(piece_index_t piece, char const* data, add_piece_flags_t const flags) const
 	{
 		sync_call(&torrent::add_piece, piece, data, flags);
+	}
+
+	void torrent_handle::add_piece(piece_index_t piece, std::vector<char> data
+		, add_piece_flags_t const flags) const
+	{
+		async_call(&torrent::add_piece_async, piece, std::move(data), flags);
 	}
 
 	void torrent_handle::read_piece(piece_index_t piece) const

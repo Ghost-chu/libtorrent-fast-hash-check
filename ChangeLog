@@ -1,3 +1,10 @@
+	* back-port fix last_upload and last_download resume data fields to use posix time
+
+1.2.19 released
+
+	* back-port load_torrent_*() functions
+	* fix issue with odd piece sizes
+
 1.2.18 released
 
 	* fix issue where stop-when-ready would not close files

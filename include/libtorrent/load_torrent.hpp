@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2009-2018, Arvid Norberg
+Copyright (c) 2022, Arvid Norberg
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -30,45 +30,41 @@ POSSIBILITY OF SUCH DAMAGE.
 
 */
 
-#include "libtorrent/aux_/time.hpp"
+#ifndef TORRENT_LOAD_TORRENT_HPP_INCLUDED
+#define TORRENT_LOAD_TORRENT_HPP_INCLUDED
 
-#include <chrono>
+#include "libtorrent/add_torrent_params.hpp"
+#include "libtorrent/span.hpp"
+#include "libtorrent/bdecode.hpp"
+#include "libtorrent/torrent_info.hpp" // for load_torrent_limits
+#include "libtorrent/aux_/export.hpp"
 
-namespace libtorrent { namespace aux {
+namespace libtorrent {
 
-	time_point time_now() { return clock_type::now(); }
-	time_point32 time_now32() { return time_point_cast<seconds32>(clock_type::now()); }
+	// These functions load the content of a .torrent file into an
+	// add_torrent_params object.
+	// The immutable part of a torrent file (the info-dictionary) is stored in
+	// the ``ti`` field in the add_torrent_params object (as a torrent_info
+	// object).
+	// The returned object is suitable to be:
+	//
+	//   * added to a session via add_torrent() or async_add_torrent()
+	//   * saved as a .torrent_file via write_torrent_file()
+	//   * turned into a magnet link via make_magnet_uri()
+	TORRENT_EXPORT add_torrent_params load_torrent_file(
+		std::string const& filename, load_torrent_limits const& cfg);
+	TORRENT_EXPORT add_torrent_params load_torrent_file(
+		std::string const& filename);
+	TORRENT_EXPORT add_torrent_params load_torrent_buffer(
+		span<char const> buffer, load_torrent_limits const& cfg);
+	TORRENT_EXPORT add_torrent_params load_torrent_buffer(
+		span<char const> buffer);
+	TORRENT_EXPORT add_torrent_params load_torrent_parsed(
+		bdecode_node const& torrent_file, load_torrent_limits const& cfg);
+	TORRENT_EXPORT add_torrent_params load_torrent_parsed(
+		bdecode_node const& torrent_file);
 
-	// for simplying implementation
-	using std::chrono::system_clock;
+}
 
+#endif
 
-	// consider using std::chrono::clock_cast on C++20
-	time_t to_time_t(const time_point32 tp)
-	{
-		// special case for unset value
-		if (tp == time_point32(seconds32(0))) return 0;
-
-		const auto lt_now = clock_type::now();
-		const auto sys_now = system_clock::now();
-
-		const auto r = sys_now + std::chrono::duration_cast<system_clock::duration>(tp - lt_now) + lt::milliseconds(500);
-		return system_clock::to_time_t(r);
-	}
-
-	// consider using std::chrono::clock_cast on C++20
-	time_point32 from_time_t(const std::time_t t)
-	{
-		// special case for unset value
-		if (t == 0) return time_point32(seconds32(0));
-
-		const auto tp = system_clock::from_time_t(t);
-		const auto sys_now = system_clock::now();
-		const auto lt_now = clock_type::now();
-
-		auto r = lt_now + std::chrono::duration_cast<clock_type::duration>(tp - sys_now);
-		// the conversion to seconds will truncate, make sure we round
-		return std::chrono::time_point_cast<seconds32>(r + milliseconds(500));
-	}
-
-} }

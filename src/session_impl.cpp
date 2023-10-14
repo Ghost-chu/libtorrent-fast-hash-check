@@ -991,7 +991,6 @@ namespace aux {
 			m_i2p_listen_socket->close(ec);
 			TORRENT_ASSERT(!ec);
 		}
-		m_i2p_listen_socket.reset();
 #endif
 
 #ifndef TORRENT_DISABLE_LOGGING
@@ -1966,7 +1965,19 @@ namespace {
 #endif
 			}
 
+#if defined TORRENT_ANDROID && __ANDROID_API__ >= 24
+			// For Android API >= 24, enum_routes with the current NETLINK based
+			// implementation is unsupported (maybe in the future the operation
+			// will be restore using another implementation). If routes is empty,
+			// allow using unspecified address is a best effort approach that
+			// seems to work. The issue with this approach is with the DHTs,
+			// because for IPv6 this is not following BEP 32 and BEP 45. See:
+			// https://www.bittorrent.org/beps/bep_0032.html
+			// https://www.bittorrent.org/beps/bep_0045.html
+			if (!routes.empty()) expand_unspecified_address(ifs, routes, eps);
+#else
 			expand_unspecified_address(ifs, routes, eps);
+#endif
 			expand_devices(ifs, eps);
 		}
 
@@ -2207,6 +2218,7 @@ namespace {
 			m_i2p_conn.close(ec);
 			return;
 		}
+		TORRENT_ASSERT(!m_abort);
 		m_i2p_conn.open(m_settings.get_str(settings_pack::i2p_hostname)
 			, m_settings.get_int(settings_pack::i2p_port)
 			, std::bind(&session_impl::on_i2p_open, this, _1));
@@ -2262,6 +2274,7 @@ namespace {
 
 	void session_impl::open_new_incoming_i2p_connection()
 	{
+		if (m_abort) return;
 		if (!m_i2p_conn.is_open()) return;
 
 		if (m_i2p_listen_socket) return;
@@ -2301,8 +2314,9 @@ namespace {
 #endif
 			return;
 		}
-		open_new_incoming_i2p_connection();
 		incoming_connection(s);
+		m_i2p_listen_socket.reset();
+		open_new_incoming_i2p_connection();
 	}
 #endif
 
@@ -5875,6 +5889,7 @@ namespace {
 
 		// TODO: refactor, move the storage to dht_tracker
 		m_dht_storage = m_dht_storage_constructor(m_dht_settings);
+		session_impl* ses = this;
 		m_dht = std::make_shared<dht::dht_tracker>(
 			static_cast<dht::dht_observer*>(this)
 			, m_io_service
@@ -5883,7 +5898,7 @@ namespace {
 				, span<char const> p
 				, error_code& ec
 				, udp_send_flags_t const flags)
-				{ send_udp_packet_listen(sock, ep, p, ec, flags); }
+				{ ses->send_udp_packet_listen(sock, ep, p, ec, flags); }
 			, m_dht_settings
 			, m_stats_counters
 			, *m_dht_storage
@@ -6200,6 +6215,7 @@ namespace {
 		// since we're destructing the session, no more alerts will make it out to
 		// the user. So stop posting them now
 		m_alerts.set_alert_mask({});
+		m_alerts.set_notify_function({});
 
 		// this is not allowed to be the network thread!
 //		TORRENT_ASSERT(is_not_thread());
